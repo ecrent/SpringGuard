@@ -12,15 +12,20 @@ import org.slf4j.LoggerFactory;
 import com.github.ecrent.spring_guard.service.ThreatDetector;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import com.github.ecrent.spring_guard.service.RateLimiter;
 
 @Component
 public class RequestInterceptorFilter extends OncePerRequestFilter {
     private static final Logger logger = LoggerFactory.getLogger(RequestInterceptorFilter.class);
 
+    private final RateLimiter rateLimiter;
     private final ThreatDetector threatDetector;
 
-    public RequestInterceptorFilter(ThreatDetector threatDetector) {
+
+
+    public RequestInterceptorFilter(ThreatDetector threatDetector, RateLimiter rateLimiter) {
         this.threatDetector = threatDetector;
+        this.rateLimiter = rateLimiter;
     }
 
     @Override
@@ -34,6 +39,11 @@ public class RequestInterceptorFilter extends OncePerRequestFilter {
         String decodedQuery = queryString != null ? URLDecoder.decode(queryString, StandardCharsets.UTF_8) : null;
         String threatType = threatDetector.detectThreatType(uri);
 
+        if (rateLimiter.isRateLimited(ip)) {
+            logger.warn("Rate limit exceeded: ip={}, method={}, uri={}, agent={}", ip, method, uri, userAgent);
+            response.sendError(HttpServletResponse.SC_FORBIDDEN, "Rate limit exceeded");
+            return;
+        }
         if (threatType == null) {
             threatType = threatDetector.detectThreatType(decodedQuery);
         }

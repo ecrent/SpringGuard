@@ -146,3 +146,65 @@ Included: URI path + query parameter inspection, SQL Injection patterns, XSS pat
 Excluded for now: Request body inspection (requires wrapping the input stream — can add as Phase 2 enhancement after the basics work)
 Excluded: Session-based tracking, persistent blocking (that's Phase 3 rate limiting + Phase 4 logging)
 Want me to expand any step into detailed instructions (like I did for Phase 1B and 1C), or are you ready to start with Phase 2B?
+
+
+Plan: Phase 3 — "Rate Limiting"
+Build an in-memory rate limiter using ConcurrentHashMap that tracks request counts per IP. IPs exceeding the threshold get blocked with HTTP 429 Too Many Requests. The rate limiter runs before threat detection — no point wasting CPU on regex if the IP is already spamming.
+
+Phase 3A — Understand the Concepts
+Rate limiting — limit how many requests a single IP can make within a time window. Prevents brute-force attacks, credential stuffing, and denial-of-service.
+
+ConcurrentHashMap — a thread-safe HashMap. Multiple Tomcat threads handle requests simultaneously (you saw nio-8080-exec-2 and exec-5 in Phase 1 logs). A regular HashMap would corrupt data under concurrent access. ConcurrentHashMap handles locking internally.
+
+HTTP 429 — the standard status code for rate limiting. Different from 403 (forbidden/blocked for security) — 429 means "you're sending too many requests, slow down."
+
+Fixed time window — count requests per IP in a fixed window (e.g., 60 seconds). When the window expires, the count resets. Simpler than a sliding window and sufficient for learning.
+
+Filter order matters. The check order inside doFilterInternal will become: rate limit check → threat detection → pass through. If an IP is spamming 1000 requests, you don't want to run 7 regex patterns on each one.
+
+Phase 3B — Create the RateLimiter Service
+Create RateLimiter.java in the service package with @Service.
+
+Data structure — ConcurrentHashMap<String, RequestInfo> where the key is the IP address and RequestInfo holds two things: the request count and the window start timestamp.
+
+Create a small inner class RequestInfo inside RateLimiter with fields: an AtomicInteger count (thread-safe counter) and a long windowStart (epoch milliseconds from System.currentTimeMillis()). An AtomicInteger is like an int that can be safely incremented from multiple threads without locking.
+
+Define two constants as fields on the class:
+
+MAX_REQUESTS = 50 (requests per window)
+WINDOW_SIZE_MS = 60_000 (window = 60 seconds in milliseconds)
+Implement boolean isRateLimited(String ip) — the core method:
+
+Use ConcurrentHashMap.compute(ip, ...) for atomic read-modify-write
+If no entry exists or window has expired → create a new RequestInfo with count=1 and windowStart=now → return false
+Otherwise increment count → if count exceeds MAX_REQUESTS → return true, else false
+Phase 3C — Wire into the Filter
+Add RateLimiter as a second constructor parameter in RequestInterceptorFilter — same pattern as ThreatDetector.
+
+Add the rate limit check as the first check inside doFilterInternal, before threat detection:
+
+Call rateLimiter.isRateLimited(ip)
+If true → logger.warn(...), set response status 429, write body, return
+If false → continue to existing threat detection code
+Phase 3D — Verify
+Spam test — run this loop from the terminal:
+
+First 50 responses should say 200, remaining 5 should say 429.
+
+Reset test — wait 60 seconds after being rate-limited, then try again → should get 200.
+
+Threat payloads within rate limit should still return 403 (not 429):
+
+
+Clean requests still return 200 as before.
+
+Relevant Files
+File	Action
+src/.../service/RateLimiter.java	New — in-memory rate limiting with ConcurrentHashMap
+src/.../filter/RequestInterceptorFilter.java	Modify — add RateLimiter injection + 429 check before threat detection
+New Concepts You'll Learn
+ConcurrentHashMap and why thread safety matters in web apps
+AtomicInteger for lock-free concurrent counting
+ConcurrentHashMap.compute() for atomic read-modify-write operations
+System.currentTimeMillis() for time-based logic
+Constructor injection with multiple dependencies
