@@ -208,3 +208,139 @@ AtomicInteger for lock-free concurrent counting
 ConcurrentHashMap.compute() for atomic read-modify-write operations
 System.currentTimeMillis() for time-based logic
 Constructor injection with multiple dependencies
+
+
+Phase 4 Roadmap — Database + Auth
+Where you are now: Your RequestInterceptorFilter has three code paths — rate-limited (429), threat-blocked (403), and allowed (pass-through). Phase 4 makes these events persistent and queryable, then locks down the query API with authentication.
+
+Phase 4A — Persist Security Events to H2 Database
+Concepts to research first (Google these, understand them before touching code):
+
+JPA (Jakarta Persistence API) — a specification that defines how Java objects map to database tables. It's like an interface — it says "these annotations exist" but doesn't implement anything itself.
+Hibernate — the implementation of JPA. Spring Boot auto-configures it. You never call Hibernate directly — you use JPA annotations and Spring does the wiring.
+Spring Data JPA — sits on top of JPA/Hibernate. You write a Java interface, Spring generates the SQL implementation at runtime. You get save(), findAll(), findById() for free with zero code.
+H2 — an in-memory database written in Java. Runs inside your app process (no external install). Data disappears on restart. Perfect for learning.
+@Entity — marks a class as a database table. Each field = a column. @Id = primary key. @GeneratedValue(strategy = GenerationType.IDENTITY) = auto-increment.
+Steps (in order):
+
+Add dependencies to pom.xml — two new ones:
+
+spring-boot-starter-data-jpa (brings in Hibernate + Spring Data)
+com.h2database:h2 with <scope>runtime</scope> (H2 only needed at runtime, not compile time)
+Configure H2 in application.properties:
+
+Set the datasource URL to jdbc:h2:mem:springguard (in-memory, named "springguard")
+Enable the H2 web console at /h2-console (a built-in database browser)
+Set spring.jpa.hibernate.ddl-auto=create-drop (Hibernate creates tables on startup, drops on shutdown)
+Optionally spring.jpa.show-sql=true to see generated SQL in your console logs — very educational
+Create the entity — new package model, new class SecurityEvent. Fields:
+
+id (Long, primary key, auto-generated)
+timestamp (LocalDateTime)
+ip, method, uri, userAgent (all String)
+action (String — one of: "ALLOWED", "BLOCKED_THREAT", "BLOCKED_RATE_LIMIT")
+threatType (String, nullable — only populated when there's a threat)
+You'll need @Entity, @Id, @GeneratedValue, and a no-arg constructor (JPA requires it)
+Create the repository — new package repository, new interface SecurityEventRepository extends JpaRepository<SecurityEvent, Long>. That's it. Empty body. Spring generates the implementation. This is the "magic" of Spring Data.
+
+Create the service — SecurityEventService in service package, annotated @Service. Inject SecurityEventRepository via constructor. Write one method: logEvent(String ip, String method, String uri, String userAgent, String action, String threatType) that builds a SecurityEvent object and calls repository.save(entity).
+
+Wire into your filter — add SecurityEventService as a third constructor parameter in RequestInterceptorFilter.java. Call logEvent(...) in all three code paths:
+
+Rate-limited path → action = "BLOCKED_RATE_LIMIT"
+Threat-blocked path → action = "BLOCKED_THREAT" + include the threatType
+Clean pass-through → action = "ALLOWED"
+Gotcha to watch for: If you don't exclude /h2-console requests from logging, you'll get noise. Consider overriding shouldNotFilter(HttpServletRequest request) in your filter to skip paths starting with /h2-console.
+
+Verify:
+
+./mvnw spring-boot:run
+curl http://localhost:8080/api/health (clean request)
+curl "http://localhost:8080/api/health?q=' OR 1=1" (blocked request)
+Open http://localhost:8080/h2-console in browser, connect with JDBC URL jdbc:h2:mem:springguard, user sa, empty password
+Run SELECT * FROM SECURITY_EVENT; — you should see both requests logged with their action types
+Phase 4B — REST API for Security Events
+Concepts to research:
+
+DTO (Data Transfer Object) — a plain class that shapes what your API returns. Never expose your @Entity directly in API responses. Why? Your entity has userAgent (internal), and if you add fields to the entity later, they'd automatically leak into your API. DTOs decouple your database schema from your API contract.
+Spring Data derived queries — name a method findByAction(String action) in your repository interface, and Spring parses the method name into SELECT * FROM security_event WHERE action = ?. No SQL needed. Google "Spring Data JPA query derivation" — the naming rules are well-documented.
+Pagination — add a Pageable parameter to a controller method and return Page<T>. Spring reads ?page=0&size=10 from query params automatically. Clients can page through large result sets.
+Steps:
+
+Create DTOs — new package dto:
+
+SecurityEventDTO — same fields as entity minus userAgent (that's internal). You'll manually map entity → DTO (or write a simple static factory method on the DTO).
+StatsDTO — holds summary data: totalEvents (long), totalBlocked (long), and topAttackingIps (a list of strings or a map of IP → count)
+Add query methods to your SecurityEventRepository interface — just declare them, Spring implements them:
+
+List<SecurityEvent> findByAction(String action);
+List<SecurityEvent> findByIp(String ip);
+List<SecurityEvent> findTop10ByOrderByTimestampDesc();
+Build stats logic in SecurityEventService:
+
+countAll() → repository.count()
+countBlocked() → query events where action is not "ALLOWED" and count them
+Top attacking IPs → fetch blocked events, group by IP using Java streams, sort by count descending
+Create the controller — SecurityEventController with @RestController and @RequestMapping("/api/events"):
+
+GET /api/events — accepts Pageable parameter, returns Page<SecurityEventDTO>. Use repository.findAll(pageable) then map entities to DTOs.
+GET /api/events/stats — returns StatsDTO built by the service
+Verify:
+
+Make a mix of requests (clean + attacks + rapid-fire for rate limiting)
+curl http://localhost:8080/api/events → paginated JSON list
+curl http://localhost:8080/api/events?page=0&size=5 → first 5 events
+curl http://localhost:8080/api/events/stats → summary JSON with counts and top IPs
+Phase 4C — Spring Security Authentication
+Concepts to research (this is the biggest conceptual leap):
+
+Spring Security's filter chain — when you add spring-boot-starter-security, Spring inserts a whole chain of security filters that run before your controllers. By default, it locks down EVERYTHING — every endpoint returns 401 until you configure exceptions. This is "secure by default."
+SecurityFilterChain bean — the modern way (Spring Security 6+) to configure security. You write a @Bean method in a @Configuration class. No more extending WebSecurityConfigurerAdapter (that's been deprecated for years — ignore old tutorials that use it).
+HTTP Basic Auth — the simplest auth mechanism. Client sends Authorization: Basic base64(user:pass) header. The server decodes and validates. Good for APIs and learning. Not for browser UIs.
+BCryptPasswordEncoder — hashes passwords with a salt. You never store plain-text passwords. When you define your in-memory user, the password must be encoded with BCrypt.
+InMemoryUserDetailsManager — stores users in memory (hardcoded). Fine for learning. In a real app, you'd implement UserDetailsService backed by a database.
+Filter ordering — your RequestInterceptorFilter (@Component + OncePerRequestFilter) runs BEFORE Spring Security by default. This is exactly what you want — rate limiting and threat detection should protect ALL traffic, even unauthenticated requests. The request flow becomes:
+
+Steps:
+
+Add dependency to pom.xml: spring-boot-starter-security
+
+Create config class — new package config, new class SecurityConfig annotated with @Configuration and @EnableWebSecurity
+
+Define SecurityFilterChain bean — a method that takes HttpSecurity http as parameter and returns http.build(). Inside, configure:
+
+.authorizeHttpRequests(...) → permit /api/health and /h2-console/** without auth, require auth for /api/events/**
+.httpBasic(Customizer.withDefaults()) → enable HTTP Basic
+.csrf(csrf -> csrf.disable()) → disable CSRF (you're building an API, not serving HTML forms)
+.headers(headers -> headers.frameOptions(f -> f.disable())) → needed for H2 console (it uses iframes)
+Define UserDetailsService bean — returns new InMemoryUserDetailsManager(...) with one user. Use User.withUsername("admin").password(encodedPassword).roles("ADMIN").build()
+
+Define PasswordEncoder bean — returns new BCryptPasswordEncoder(). Use it to encode the admin password.
+
+Two gotchas that WILL bite you:
+
+After adding Spring Security, if you start the app without your SecurityConfig, every endpoint returns 401 including /api/health. Spring Security locks everything by default. Don't panic — it means it's working. Your config opens the paths you choose.
+Your existing test in SpringGuardApplicationTests.java may fail because the Spring context now loads Security and your test doesn't provide auth. Fix it with @WithMockUser annotation on the test class, or add test-specific security config.
+Verify:
+
+curl http://localhost:8080/api/health → 200 (public, no auth)
+curl http://localhost:8080/api/events → 401 Unauthorized (protected)
+curl -u admin:yourpassword http://localhost:8080/api/events → 200 with event data
+curl "http://localhost:8080/api/health?q=<script>alert(1)</script>" → 403 (threat detection still works, runs before auth)
+Rapid-fire curl loop → 429 (rate limiting still works)
+H2 console still accessible at http://localhost:8080/h2-console
+The Big Picture — How It All Connects
+
+Recommended Order of Work
+Do 4A first (database) → verify with H2 console → then 4B (API) → verify with curl → then 4C (auth) → verify with curl + credentials. Each sub-phase is independently testable. If something breaks, you know which layer caused it.
+
+What You'll Learn
+JPA entity mapping (@Entity, @Id, @GeneratedValue)
+Spring Data repositories (zero-boilerplate CRUD)
+H2 in-memory database + web console
+DTO pattern for clean API design
+Pagination with Pageable/Page<T>
+SecurityFilterChain (modern Spring Security config)
+HTTP Basic auth + BCryptPasswordEncoder
+How your servlet filter and Spring Security's filter chain coexist
+Ready to start with Phase 4A? Once you get into it, let me know if you want me to explain any concept deeper — like how JPA annotations map to SQL, or how SecurityFilterChain builder methods work.
