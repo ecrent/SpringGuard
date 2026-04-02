@@ -283,6 +283,46 @@ countBlocked() → query events where action is not "ALLOWED" and count them
 Top attacking IPs → fetch blocked events, group by IP using Java streams, sort by count descending
 Create the controller — SecurityEventController with @RestController and @RequestMapping("/api/events"):
 
+Where You Are
+You've already built more than you might realize:
+
+Entity, Repository, DTOs — all done. Your SecurityEventDTO even has the fromEntity() factory method, and StatsDTO has the right shape.
+Repository query methods — findByAction(), findByIp(), findTop10ByOrderByTimestampDesc() — all declared.
+SecurityEventService — has logEvent() and getEvents(Pageable).
+Two things are missing to finish Phase 4B:
+
+Step 1: Add stats logic to SecurityEventService
+Your service needs a method that builds and returns a StatsDTO. Think about what data it needs:
+
+Total events: Your repository inherits a method from JpaRepository that counts all rows. Look at what JpaRepository gives you for free (hint: it's a one-word method).
+Blocked events: You already have findByAction(String action). But "blocked" means both "BLOCKED_THREAT" and "BLOCKED_RATE_LIMIT". You have two options:
+Fetch all events and filter in Java
+Or use repository.count() minus the count of "ALLOWED" events — think about which is simpler
+Top attacking IPs: Fetch the blocked events, then use Java Streams to group them by IP and count occurrences. The key methods to research:
+stream().collect(Collectors.groupingBy(..., Collectors.counting())) — this gives you a Map<String, Long>
+Then sort that map by value descending and take the top entries
+Try writing this method yourself. If you get stuck on the Streams part, that's normal — it's the trickiest part. Try getting totalEvents and blockedEvents working first, then tackle the map.
+
+Step 2: Create SecurityEventController
+Create a new class in the controller package. Here's what you need to figure out:
+
+Annotate it with @RestController and @RequestMapping("/api/events") — just like HealthController but with a base path
+Inject SecurityEventService via constructor (same pattern you've used everywhere)
+GET /api/events — the method takes a Pageable parameter (Spring auto-populates it from ?page=0&size=5 query params). Call your service's getEvents(), then map the Page<SecurityEvent> to Page<SecurityEventDTO>. Research Page.map() — it works like stream().map() but preserves pagination metadata.
+GET /api/events/stats — maps to a sub-path. Call your stats method, return the DTO.
+Key question to think about: For the /stats endpoint, what @GetMapping value do you use given that the class already has @RequestMapping("/api/events")?
+
+Step 3: Verify
+Once both pieces are in place:
+
+
+Then generate some mixed traffic:
+
+
+The events endpoint should return paginated JSON. The stats endpoint should show counts and the IP map.
+
+Start with Step 1 — add the stats method to SecurityEventService.java. Get totalEvents returning correctly first, then layer on blockedEvents, then tackle the Streams grouping for top IPs. Show me what you come up with and I'll help you through any rough spots.
+
 GET /api/events — accepts Pageable parameter, returns Page<SecurityEventDTO>. Use repository.findAll(pageable) then map entities to DTOs.
 GET /api/events/stats — returns StatsDTO built by the service
 Verify:

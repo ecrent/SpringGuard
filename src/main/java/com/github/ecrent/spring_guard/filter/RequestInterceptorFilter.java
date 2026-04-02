@@ -47,6 +47,7 @@ public class RequestInterceptorFilter extends OncePerRequestFilter {
         if (rateLimiter.isRateLimited(ip)) {
             logger.warn("Rate limit exceeded: ip={}, method={}, uri={}, agent={}", ip, method, uri, userAgent);
             securityEventService.logEvent(ip, method, uri, userAgent, "BLOCKED_RATE_LIMIT", null);
+            
             response.sendError(HttpServletResponse.SC_FORBIDDEN, "Rate limit exceeded");
             return;
         }
