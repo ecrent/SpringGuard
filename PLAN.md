@@ -331,6 +331,8 @@ Make a mix of requests (clean + attacks + rapid-fire for rate limiting)
 curl http://localhost:8080/api/events → paginated JSON list
 curl http://localhost:8080/api/events?page=0&size=5 → first 5 events
 curl http://localhost:8080/api/events/stats → summary JSON with counts and top IPs
+
+
 Phase 4C — Spring Security Authentication
 Concepts to research (this is the biggest conceptual leap):
 
