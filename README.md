@@ -1,6 +1,6 @@
-# SpringGuard
+# spring_boot_security_project
 
-SpringGuard is a security middleware suite for Spring Boot that demonstrates common defensive programming practices in Java. It intercepts every incoming HTTP request and applies layered protections: threat detection (SQL injection & XSS), IP-based rate limiting, and a full audit log of all security events — all persisted to a database and queryable via a REST API.
+spring_boot_security_project is a security middleware suite for Spring Boot that demonstrates common defensive programming practices in Java. It intercepts every incoming HTTP request and applies layered protections: threat detection (SQL injection & XSS), IP-based rate limiting, and a full audit log of all security events — all persisted to a database and queryable via a REST API.
 
 Built as a portfolio project to showcase practical Java and Spring Security skills.
 
